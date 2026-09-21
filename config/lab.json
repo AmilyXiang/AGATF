@@ -1,0 +1,25 @@
+{
+  "name": "lab_sh_01",
+  "host": "10.10.10.10",
+  "secret_ref": "lab/deskphone/test-secret",
+  "resources": {
+    "camera": "cam-01",
+    "robot": "robot-07",
+    "audio": "mic-02",
+    "network": "net-bridge-01"
+  },
+  "duts": [
+    {
+      "id": "dut_01",
+      "profile": "OEM_PHONE_A",
+      "ip": "10.10.10.21",
+      "ssh_port": 22
+    },
+    {
+      "id": "dut_02",
+      "profile": "OEM_PHONE_A",
+      "ip": "10.10.10.22",
+      "ssh_port": 22
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="plan-OEM_PHONE_A-SIP-OXE" tests="3" failures="0">
+  <testcase classname="plan-OEM_PHONE_A-SIP-OXE" name="TC_CALL_001" />
+  <testcase classname="plan-OEM_PHONE_A-SIP-OXE" name="TC_HOLD_001" />
+  <testcase classname="plan-OEM_PHONE_A-SIP-OXE" name="TC_AUDIO_001" />
+</testsuite>
