@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import sys
+import threading
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -18,6 +19,7 @@ from core.exit_codes import ExitCode
 from core.models import AtomicStep, CaseStep, DUTInstance, DUTPool, DeviceConfig, LabConfig, RuntimeContext, SelectionStatus, TestCase, TestPlan
 from core.provider import ApiStubProvider, PhysicalStubProvider, StubProvider
 from core.resolver import Resolver
+from oem.ale700a import ActionUrlListener, Ale700aProvider
 from core.selection import filter_applicable_cases
 
 logger = logging.getLogger(__name__)
@@ -109,8 +111,9 @@ def generate_plan(args: argparse.Namespace) -> None:
     case_data = load_json(args.cases)
     context = build_runtime_context(device_data, lab_data)
 
-    # Registry: specific backends first so operation_mode picks API vs Physical.
-    resolver = Resolver([ApiStubProvider(), PhysicalStubProvider(), StubProvider()])
+    # Registry: specific backends first so operation_mode picks the right HOW
+    # (ALE-700A Active URI / API / Physical); the 'any' stub is the fallback.
+    resolver = Resolver([Ale700aProvider(), ApiStubProvider(), PhysicalStubProvider(), StubProvider()])
     all_cases = parse_cases(case_data)
 
     # Configuration-driven selection: only applicable cases enter the plan.
@@ -269,7 +272,7 @@ def run_plan(args: argparse.Namespace) -> None:
     logger.info("run: plan=%s junit=%s", args.plan, getattr(args, "junit", None))
     plan_data = load_json(args.plan)
     # Register every provider so the executor can resolve each item by name.
-    providers = [ApiStubProvider(), PhysicalStubProvider(), StubProvider()]
+    providers = [Ale700aProvider(), ApiStubProvider(), PhysicalStubProvider(), StubProvider()]
     executor = Executor({p.name: p for p in providers})
 
     plan_items = []
@@ -351,6 +354,27 @@ def run_plan(args: argparse.Namespace) -> None:
     return ExitCode.SUCCESS
 
 
+def listen(args: argparse.Namespace) -> int:
+    # Start the Action URL listener and print phone status callbacks as they
+    # arrive; used for manual verification against a real ALE-700A.
+    listener = ActionUrlListener(
+        host=args.host,
+        port=args.port,
+        on_event=lambda e: print(f"[event] {e.event} {e.params}"),
+    ).start()
+    print(f"Action URL listener on {listener.url}")
+    print("Configure the phone Action URL to point here, e.g.:")
+    print(f"  {listener.url}/action?event=call_established&mac=$mac&cid=$call_id&dt=$date_time")
+    print("Press Ctrl+C to stop.")
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        print("\nStopping listener.")
+    finally:
+        listener.stop()
+    return ExitCode.SUCCESS
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeskPhone automation CLI-first core")
     parser.add_argument(
@@ -387,6 +411,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--plan", required=True)
     run_parser.add_argument("--junit", default=None, help="Write JUnit XML results to this path")
     run_parser.set_defaults(func=run_plan)
+
+    listen_parser = subparsers.add_parser("listen", help="Start the Action URL listener for phone status callbacks")
+    listen_parser.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
+    listen_parser.add_argument("--port", type=int, default=8080, help="Bind port (default 8080)")
+    listen_parser.set_defaults(func=listen)
 
     return parser
 
