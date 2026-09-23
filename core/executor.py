@@ -23,10 +23,12 @@ logger = logging.getLogger(__name__)
 class Executor:
     """Runs all plan items using the provider selected during resolution."""
 
-    def __init__(self, providers_by_name: dict[str, object]) -> None:
+    def __init__(self, providers_by_name: dict[str, object], dut_numbers: dict[str, str] | None = None) -> None:
         self.providers_by_name = providers_by_name
         # Owns resource Reserve (step 7) and Release (step 10) during a run.
         self.resources = ResourceManager()
+        # DUT id -> phone number, used to resolve dial/transfer targets.
+        self.dut_numbers = dut_numbers or {}
 
     def run_plan(self, plan: TestPlan) -> ExecutionResult:
         evidences: list[Evidence] = []
@@ -46,10 +48,17 @@ class Executor:
             logger.info("case %s: provider=%s reserved=%s", case.id, item.provider, reserved_ids)
             try:
                 steps = item.compiled_steps or compile_case(case)
+                # Resolve each bound role to its phone number for this case.
+                role_numbers = {
+                    role: self.dut_numbers.get(dut_id, "")
+                    for role, dut_id in item.role_bindings.items()
+                }
+                context = {"role_bindings": dict(item.role_bindings), "role_numbers": role_numbers}
                 for step in steps:
                     ok, step_data = provider.run_step(
                         case,
                         {"kind": step.kind, "name": step.name, "timeout": step.timeout},
+                        context,
                     )
                     details["steps"].append(step_data)
                     if not ok:

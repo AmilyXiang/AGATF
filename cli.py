@@ -19,7 +19,7 @@ from core.exit_codes import ExitCode
 from core.models import AtomicStep, CaseStep, DUTInstance, DUTPool, DeviceConfig, LabConfig, RuntimeContext, SelectionStatus, TestCase, TestPlan
 from core.provider import ApiStubProvider, PhysicalStubProvider, StubProvider
 from core.resolver import Resolver
-from oem.ale700a import ActionUrlListener, Ale700aProvider
+from oem.ale700a import ActionUrlListener, ActiveUriClient, Ale700aProvider
 from core.selection import filter_applicable_cases
 
 logger = logging.getLogger(__name__)
@@ -41,12 +41,19 @@ def build_runtime_context(device_data: dict, lab_data: dict) -> RuntimeContext:
         operation_mode=device_data.get("operation_mode", "physical"),
         firmware=device_data.get("firmware", "unknown"),
         ip=device_data.get("ip"),
+        web_protocol=device_data.get("web_protocol", "http"),
+        web_port=device_data.get("web_port"),
+        web_username=device_data.get("web_username", "admin"),
+        web_verify_tls=device_data.get("web_verify_tls", True),
     )
     lab = LabConfig(
         name=lab_data["name"],
         host=lab_data["host"],
         secret_ref=lab_data.get("secret_ref"),
+        password=lab_data.get("password"),
         resources=lab_data.get("resources", {}),
+        action_url_host=lab_data.get("action_url", {}).get("host", "0.0.0.0"),
+        action_url_port=lab_data.get("action_url", {}).get("port", 8080),
     )
     raw_instances = lab_data.get("duts", lab_data.get("instances", []))
     instances = [
@@ -55,6 +62,7 @@ def build_runtime_context(device_data: dict, lab_data: dict) -> RuntimeContext:
             profile=item.get("profile", device.name),
             ip=item.get("ip"),
             ssh_port=item.get("ssh_port"),
+            number=item.get("number"),
             resources=item.get("resources", {}),
         )
         for item in raw_instances
@@ -267,13 +275,55 @@ def _write_junit(result, path: Path) -> None:
     logger.info("junit: wrote %d tests (%d failures) to %s", len(result.evidences), failures, path)
 
 
+def _build_live_provider(args: argparse.Namespace) -> tuple[Ale700aProvider, ActionUrlListener, dict[str, str]]:
+    # Construct the real ALE-700A provider + shared Action URL listener from
+    # device/lab config so run --live drives a physical phone through the plan.
+    device_data = load_json(args.device)
+    lab_data = load_json(args.lab)
+    ip = device_data["ip"]
+    protocol = device_data.get("web_protocol", "http")
+    port = device_data.get("web_port")
+    base_url = f"{protocol}://{ip}" + (f":{port}" if port else "")
+    verify_tls = device_data.get("web_verify_tls", True) and not args.insecure
+
+    au = lab_data.get("action_url", {})
+    listener = ActionUrlListener(
+        host=au.get("host", "0.0.0.0"),
+        port=au.get("port", 8080),
+        on_event=lambda e: logger.info("[action-url] %s %s", e.event, e.params),
+    ).start()
+    print(f"Action URL listener on {listener.url}")
+
+    client = ActiveUriClient(
+        base_url,
+        username=device_data.get("web_username", "admin"),
+        password=lab_data.get("password"),
+        secret_ref=lab_data.get("secret_ref"),
+        verify_tls=verify_tls,
+    )
+    provider = Ale700aProvider(client=client, listener=listener, default_number=args.number or "")
+    # DUT id -> phone number, so dial/transfer targets come from bindings.
+    dut_numbers = {d["id"]: d.get("number", "") for d in lab_data.get("duts", lab_data.get("instances", []))}
+    return provider, listener, dut_numbers
+
+
 def run_plan(args: argparse.Namespace) -> None:
     # slide7 steps 8-9: rebuild the plan from JSON, execute it, print evidence.
-    logger.info("run: plan=%s junit=%s", args.plan, getattr(args, "junit", None))
+    logger.info("run: plan=%s junit=%s live=%s", args.plan, getattr(args, "junit", None), getattr(args, "live", False))
     plan_data = load_json(args.plan)
     # Register every provider so the executor can resolve each item by name.
-    providers = [Ale700aProvider(), ApiStubProvider(), PhysicalStubProvider(), StubProvider()]
-    executor = Executor({p.name: p for p in providers})
+    # In --live mode the ALE-700A stub is replaced by a real, phone-driving one.
+    listener: ActionUrlListener | None = None
+    dut_numbers: dict[str, str] = {}
+    if getattr(args, "live", False):
+        if not args.device or not args.lab:
+            logger.error("run --live requires --device and --lab")
+            return ExitCode.CONFIG_ERROR
+        ale_provider, listener, dut_numbers = _build_live_provider(args)
+    else:
+        ale_provider = Ale700aProvider()
+    providers = [ale_provider, ApiStubProvider(), PhysicalStubProvider(), StubProvider()]
+    executor = Executor({p.name: p for p in providers}, dut_numbers=dut_numbers)
 
     plan_items = []
     for item in plan_data["items"]:
@@ -325,7 +375,11 @@ def run_plan(args: argparse.Namespace) -> None:
         dut_pool=plan_data.get("dut_pool", []),
     )
 
-    result = executor.run_plan(plan)
+    try:
+        result = executor.run_plan(plan)
+    finally:
+        if listener is not None:
+            listener.stop()
     print(json.dumps({
         "plan_id": result.plan_id,
         "evidences": [
@@ -351,6 +405,24 @@ def run_plan(args: argparse.Namespace) -> None:
         logger.warning("run: %d/%d cases failed", failed, len(result.evidences))
         return ExitCode.TEST_FAILURE
     logger.info("run: all %d cases passed", len(result.evidences))
+    return ExitCode.SUCCESS
+
+
+def press(args: argparse.Namespace) -> int:
+    # Send a single Active URI key to a real phone for the simplest live check.
+    # The password is read from an environment variable, never from the CLI.
+    base_url = f"{args.protocol}://{args.ip}" + (f":{args.port}" if args.port else "")
+    client = ActiveUriClient(
+        base_url,
+        username=args.user,
+        secret_ref=args.secret_env,
+        verify_tls=not args.insecure,
+    )
+    ok, detail = client.send(args.key)
+    print(json.dumps(detail, indent=2))
+    if not ok:
+        logger.warning("press: phone did not accept key '%s'", args.key)
+        return ExitCode.TEST_FAILURE
     return ExitCode.SUCCESS
 
 
@@ -410,7 +482,22 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Execute a generated plan")
     run_parser.add_argument("--plan", required=True)
     run_parser.add_argument("--junit", default=None, help="Write JUnit XML results to this path")
+    run_parser.add_argument("--live", action="store_true", help="Drive a real ALE-700A (Active URI + Action URL) instead of the stub")
+    run_parser.add_argument("--device", default=None, help="Device config (required with --live)")
+    run_parser.add_argument("--lab", default=None, help="Lab config with credentials/action_url (required with --live)")
+    run_parser.add_argument("--number", default=None, help="Dial/transfer target number for live actions")
+    run_parser.add_argument("--insecure", action="store_true", help="Skip TLS verification for self-signed phone certs")
     run_parser.set_defaults(func=run_plan)
+
+    press_parser = subparsers.add_parser("press", help="Send one Active URI key to a real phone (simplest live check)")
+    press_parser.add_argument("--ip", required=True, help="Phone IP address, e.g. 10.10.6.141")
+    press_parser.add_argument("--key", required=True, help="Active URI key, e.g. SPEAKER or 'SPEAKER;1007;ENTER'")
+    press_parser.add_argument("--protocol", default="http", choices=["http", "https"], help="Web protocol (default http)")
+    press_parser.add_argument("--port", type=int, default=None, help="Web port (default: protocol default)")
+    press_parser.add_argument("--user", default="admin", help="HTTP Basic user (default admin)")
+    press_parser.add_argument("--secret-env", default="ALE700A_PASSWORD", help="Env var holding the phone password (default ALE700A_PASSWORD)")
+    press_parser.add_argument("--insecure", action="store_true", help="Skip TLS cert verification (phones use self-signed certs)")
+    press_parser.set_defaults(func=press)
 
     listen_parser = subparsers.add_parser("listen", help="Start the Action URL listener for phone status callbacks")
     listen_parser.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")

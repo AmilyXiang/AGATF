@@ -36,6 +36,26 @@ def test_dial_maps_to_speaker_number_enter():
     assert sender.calls[0][0] == detail["url"]
 
 
+def test_dial_resolves_target_number_from_role_bindings():
+    sender = _RecordingSender()
+    provider = Ale700aProvider(ActiveUriClient("http://10.10.6.136", sender=sender), default_number="9999")
+    context = {"role_numbers": {"caller": "1006", "callee": "1007"}}
+
+    _, detail = provider.run_step(_case(), {"kind": "ACTION", "name": "phone.dial", "timeout": 30}, context)
+
+    # target_role defaults to callee: dials 1007, not the fallback 9999.
+    assert detail["url"].endswith("?key=SPEAKER;1007;ENTER")
+
+
+def test_dial_falls_back_to_default_number_without_context():
+    sender = _RecordingSender()
+    provider = Ale700aProvider(ActiveUriClient("http://10.10.6.136", sender=sender), default_number="9999")
+
+    _, detail = provider.run_step(_case(), {"kind": "ACTION", "name": "phone.dial", "timeout": 30})
+
+    assert detail["url"].endswith("?key=SPEAKER;9999;ENTER")
+
+
 def test_hold_maps_to_f_hold_key():
     sender = _RecordingSender()
     provider = Ale700aProvider(ActiveUriClient("http://10.10.6.141", sender=sender))

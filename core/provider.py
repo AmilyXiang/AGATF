@@ -57,8 +57,12 @@ class BaseProvider(ABC):
         return self.backend in ("any", operation_mode)
 
     @abstractmethod
-    def run_step(self, case: TestCase, step: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        """Execute one atomic step and return (ok, detail)."""
+    def run_step(self, case: TestCase, step: dict[str, Any], context: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+        """Execute one atomic step and return (ok, detail).
+
+        ``context`` carries per-case binding data (e.g. role_numbers) resolved
+        from the plan; providers that need a target number read it from here.
+        """
 
     @abstractmethod
     def finalize(self, case: TestCase) -> dict[str, Any]:
@@ -70,7 +74,7 @@ class _MessageProvider(BaseProvider):
 
     messages: dict[str, str] = {}
 
-    def run_step(self, case: TestCase, step: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    def run_step(self, case: TestCase, step: dict[str, Any], context: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
         name = step.get("name", "")
         details = {
             "kind": step.get("kind", ""),

@@ -18,16 +18,14 @@ Basic auth) to drive a physical phone.
 """
 from __future__ import annotations
 
-import base64
 import logging
 import os
 from typing import Any, Callable
-from urllib import request as urllib_request
-from urllib.error import HTTPError, URLError
 
 from core.models import Capability, TestCase
 from core.provider import BaseProvider
 from oem.ale700a.action_url import ActionUrlListener
+from tools.http_client import HttpClient, basic_auth_header
 
 logger = logging.getLogger(__name__)
 
@@ -67,28 +65,31 @@ class ActiveUriClient:
         *,
         username: str = "admin",
         secret_ref: str | None = None,
+        password: str | None = None,
         sender: Sender | None = None,
         timeout: int = 10,
+        verify_tls: bool = True,
+        http: HttpClient | None = None,
     ) -> None:
         # No base_url and no sender => dry-run: record the URL, send nothing.
         self.base_url = base_url.rstrip("/") if base_url else None
         self.username = username
         self.secret_ref = secret_ref
+        # Inline password (internal repos) takes precedence over secret_ref.
+        self.password = password
         self._sender = sender
-        self.timeout = timeout
+        # Generic HTTP transport; injectable for tests / shared with CGI calls.
+        self._http = http or HttpClient(timeout=timeout, verify_tls=verify_tls)
 
     def build_url(self, key_sequence: str) -> str:
         base = self.base_url or "http://<phone-ip>"
         return f"{base}{ACTIVE_URI_PATH}?key={key_sequence}"
 
     def _auth_header(self) -> dict[str, str]:
-        # Password is read from the environment via the secret reference; it is
-        # never stored in config or embedded in the URL (avoids leaking creds).
-        password = os.environ.get(self.secret_ref, "") if self.secret_ref else ""
-        if not password:
-            return {}
-        token = base64.b64encode(f"{self.username}:{password}".encode()).decode()
-        return {"Authorization": f"Basic {token}"}
+        # Inline password wins; otherwise resolve the secret reference from the
+        # environment. Credentials are sent as a Basic header, never in the URL.
+        password = self.password or (os.environ.get(self.secret_ref, "") if self.secret_ref else "")
+        return basic_auth_header(self.username, password)
 
     def send(self, key_sequence: str) -> tuple[bool, dict[str, Any]]:
         url = self.build_url(key_sequence)
@@ -98,23 +99,12 @@ class ActiveUriClient:
             logger.debug("[ale700a] dry-run %s", url)
             return True, detail
 
-        sender = self._sender or self._http_get
+        sender = self._sender or self._http.get
         ok, status = sender(url, self._auth_header())
         detail["mode"] = "live"
         detail["http_status"] = status
         logger.debug("[ale700a] sent %s -> %s (%s)", url, status, ok)
         return ok, detail
-
-    def _http_get(self, url: str, headers: dict[str, str]) -> tuple[bool, int]:
-        req = urllib_request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib_request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 - fixed OEM CGI endpoint
-                return 200 <= resp.status < 300, resp.status
-        except HTTPError as exc:
-            return False, exc.code
-        except URLError as exc:
-            logger.warning("[ale700a] request failed: %s", exc)
-            return False, 0
 
 
 class Ale700aProvider(BaseProvider):
@@ -136,16 +126,23 @@ class Ale700aProvider(BaseProvider):
         default_number: str = "",
         listener: ActionUrlListener | None = None,
         verify_timeout: float = 10.0,
+        target_role: str = "callee",
     ) -> None:
         self.client = client or ActiveUriClient()
-        # Number used when an action template needs a dial / transfer target.
+        # Fallback dial/transfer target when no role number is resolved.
         self.default_number = default_number
         # Optional Action URL listener; when set, verifications wait for the
         # phone's real status callback instead of only confirming acceptance.
         self.listener = listener
         self.verify_timeout = verify_timeout
+        # Logical role whose number is dialed/transferred to (from bindings).
+        self.target_role = target_role
 
-    def run_step(self, case: TestCase, step: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    def _resolve_number(self, context: dict[str, Any] | None) -> str:
+        role_numbers = (context or {}).get("role_numbers", {})
+        return role_numbers.get(self.target_role) or self.default_number
+
+    def run_step(self, case: TestCase, step: dict[str, Any], context: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
         name = step.get("name", "")
         kind = step.get("kind", "")
 
@@ -160,7 +157,8 @@ class Ale700aProvider(BaseProvider):
                     "case": case.id,
                     "error": f"unsupported Active URI action '{name}'",
                 }
-            key_sequence = template.format(number=self.default_number)
+            number = self._resolve_number(context) if "{number}" in template else ""
+            key_sequence = template.format(number=number)
             ok, detail = self.client.send(key_sequence)
             detail.update(
                 {

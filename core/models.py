@@ -56,6 +56,11 @@ class DeviceProfile:
     operation_mode: str = "physical"
     firmware: str = "unknown"
     ip: str | None = None
+    # Web management connection defaults for this device type (Active URI / CGI).
+    web_protocol: str = "http"
+    web_port: int | None = None
+    web_username: str = "admin"
+    web_verify_tls: bool = True
 
 
 # Backward-compatible name for the original P0 model.
@@ -70,6 +75,7 @@ class DUTInstance:
     profile: str
     ip: str | None = None
     ssh_port: int | None = None
+    number: str | None = None
     resources: dict[str, str] = field(default_factory=dict)
 
 
@@ -91,13 +97,19 @@ class DUTPool:
 class LabConfig:
     """Lab/SW config (slide4): environment and available resources.
 
-    Only a secret reference is stored, never plaintext credentials.
+    Credentials are referenced via secret_ref (resolved from a secret store /
+    environment). For access-controlled internal repos an inline password may
+    be set instead; secret_ref stays the preferred, non-plaintext path.
     """
 
     name: str
     host: str
     secret_ref: str | None = None
+    password: str | None = None
     resources: dict[str, str] = field(default_factory=dict)
+    # Action URL listener bind address for receiving phone status callbacks.
+    action_url_host: str = "0.0.0.0"
+    action_url_port: int = 8080
 
 
 @dataclass

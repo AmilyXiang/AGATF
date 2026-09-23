@@ -1,0 +1,24 @@
+{
+  "name": "lab_ale700a",
+  "host": "10.10.6.1",
+  "secret_ref": "ALE700A_PASSWORD",
+  "password": "*tx8000#",
+  "action_url": {
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "duts": [
+    {
+      "id": "dut_ale_01",
+      "profile": "ALE700A",
+      "ip": "10.10.6.136",
+      "number": "1006"
+    },
+    {
+      "id": "dut_ale_02",
+      "profile": "ALE700A",
+      "ip": "10.10.6.137",
+      "number": "1007"
+    }
+  ]
+}
