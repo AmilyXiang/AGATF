@@ -1,0 +1,10 @@
+{
+  "_comment": "Device Profile template (slide4): describes a device TYPE only. Copy to device_<model>.json and edit. Reach/credential details (ip, control) live on each DUT in the Lab Config, not here.",
+  "name": "MODEL_NAME",
+  "protocol": "SIP",
+  "platform": "OXE",
+  "capabilities": ["basic_call", "hold", "resume", "transfer", "audio"],
+  "operation_mode": "physical",
+  "firmware": "unknown"
+}
+

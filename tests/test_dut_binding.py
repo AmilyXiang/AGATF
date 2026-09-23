@@ -31,8 +31,8 @@ def test_resolver_binds_logical_roles_to_distinct_duts():
 
 def test_generated_plan_contains_role_bindings(tmp_path):
     class Args:
-        device = "config/device.json"
-        lab = "config/lab.json"
+        device = "tests/fixtures/device.json"
+        lab = "tests/fixtures/lab.json"
         cases = "cases/common.json"
         output = str(tmp_path / "plan.json")
         scope = "common"

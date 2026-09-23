@@ -9,9 +9,9 @@ from core.exit_codes import ExitCode
 
 
 class _CfgArgs:
-    device = "config/device.json"
-    lab = "config/lab.json"
-    cases = "cases/common.json"
+    device = "tests/fixtures/device.json"
+    lab = "tests/fixtures/lab.json"
+    cases = "cases"
     scope = "common"
 
 
@@ -23,7 +23,7 @@ def test_validate_returns_success_for_valid_common_scope(capsys):
 
 
 def test_validate_reports_blocked_resource(tmp_path):
-    lab = json.loads(Path("config/lab.json").read_text(encoding="utf-8"))
+    lab = json.loads(Path("tests/fixtures/lab.json").read_text(encoding="utf-8"))
     lab["resources"].pop("audio", None)
     lab_path = tmp_path / "lab.json"
     lab_path.write_text(json.dumps(lab), encoding="utf-8")
@@ -47,9 +47,9 @@ def test_run_returns_success_and_writes_junit(tmp_path):
     junit_path = tmp_path / "results.xml"
 
     class PlanArgs:
-        device = "config/device.json"
-        lab = "config/lab.json"
-        cases = "cases/common.json"
+        device = "tests/fixtures/device.json"
+        lab = "tests/fixtures/lab.json"
+        cases = "cases"
         output = str(plan_path)
         scope = "common"
 

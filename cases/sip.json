@@ -1,0 +1,13 @@
+[
+  {
+    "id": "TC_SIP_REG_001",
+    "name": "sip_registration",
+    "description": "SIP registration against the call server.",
+    "scope": "sip",
+    "protocols": ["SIP"],
+    "required_capabilities": ["basic_call"],
+    "steps": [
+      {"action": "reboot", "expected": "registered", "timeout": 60}
+    ]
+  }
+]

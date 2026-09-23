@@ -47,7 +47,7 @@ python -m pytest -q
 预期结果：所有测试通过，例如：
 
 ```text
-27 passed
+55 passed
 ```
 
 ---
@@ -65,6 +65,9 @@ python -m pytest -q
 | `tests/test_cli_commands.py` | validate / list / run 的退出码与 JUnit 输出 |
 | `tests/test_provider_binding.py` | 同一 Case 按 operation_mode 绑定 API / Physical Provider，Case 不变 |
 | `tests/test_ppt_contract.py` | Test Plan 契约：保留 case steps、compiled_steps、协议过滤 |
+| `tests/test_action_url.py` | Action URL 回调监听与闭环验证（真机事件到达才算通过） |
+| `tests/test_ssh_client.py` | 通用 SSH 传输工具与 secret_ref 解析 |
+| `tests/test_ale700a_provider.py` | ALE-700A Active URI provider 的动作映射与验证 |
 
 ### 运行单个测试文件
 
@@ -90,10 +93,14 @@ python -m pytest -v
 
 框架提供四个命令：`validate` / `list` / `plan` / `run`。
 
+> Case 库固定在 `cases/` 目录（按 scope 拆分为 `common.json` / `sip.json` / `noe.json`），命令**不再需要 `--cases`**；用 `--scope`（`common` / `sip` / `noe`）选择子集，省略 `--scope` 则纳入全部适用 Case。
+>
+> 下面用 `tests/fixtures/` 里的通用配置（OEM_PHONE_A physical + 台架资源）演示，可覆盖资源绑定与 Provider 选择等全部场景。真机验证见 4.6。
+
 ### 4.1 validate（只校验，不执行）
 
 ```powershell
-python cli.py validate --device config/device.json --lab config/lab.json --cases cases/common.json --scope common
+python cli.py validate --device tests/fixtures/device.json --lab tests/fixtures/lab.json --scope common
 ```
 
 预期输出每个 Case 的状态，不执行任何测试：
@@ -108,7 +115,7 @@ NOT_APPLICABLE TC_SIP_REG_001: scope 'sip' != requested 'common'
 ### 4.2 list（列出 Case 及状态）
 
 ```powershell
-python cli.py list --device config/device.json --lab config/lab.json --cases cases/common.json
+python cli.py list --device tests/fixtures/device.json --lab tests/fixtures/lab.json
 ```
 
 预期输出：
@@ -121,7 +128,7 @@ NOT_APPLICABLE   TC_NOE_INIT_001  noe_initialization
 ### 4.3 生成 Test Plan
 
 ```powershell
-python cli.py plan --device config/device.json --lab config/lab.json --cases cases/common.json --output out/plan.json --scope common
+python cli.py plan --device tests/fixtures/device.json --lab tests/fixtures/lab.json --output out/plan.json --scope common
 ```
 
 预期输出：
@@ -151,6 +158,21 @@ python cli.py run --plan out/plan.json --junit out/results.xml
 - evidence 中包含 `reserved_resources`（执行期锁定的 DUT / 资源）
 - 生成 `out/results.xml`（JUnit 格式，供 Jenkins 消费）
 - 退出码：全部 pass 为 `0`；有 case 失败为 `4`
+
+### 4.6 真机验证（可选）
+
+对真实设备用**实例配置** + `--live`，并用 `--dut` 指定受控设备：
+
+```powershell
+python cli.py run --plan out/plan.json --live --device config/device/device_ale700a.json --lab config/lab/lab_ale700a.json --dut dut_ale_01 --insecure --junit out/results.xml
+```
+
+OEM 专属调试命令不在中立 CLI 里，放在 OEM 入口：
+
+```powershell
+python -m oem.ale700a press --ip 10.10.6.136 --key SPEAKER
+python -m oem.ale700a listen
+```
 
 ### 4.5 结构化退出码
 
@@ -189,11 +211,11 @@ python cli.py run --plan out/plan.json --junit out/results.xml
 
 ### 场景 B：验证资源不足
 
-将 `config/lab.json` 中 `resources` 移除 `audio`，重新生成 plan，`TC_AUDIO_001` 应变为 `BLOCKED_RESOURCE`。
+将 `tests/fixtures/lab.json` 中 `resources` 移除 `audio`，重新生成 plan，`TC_AUDIO_001` 应变为 `BLOCKED_RESOURCE`。
 
 ### 场景 C：验证多 DUT 绑定
 
-`config/lab.json` 中的 `duts` 提供两台 DUT，`TC_CALL_001` / `TC_HOLD_001` / `TC_AUDIO_001` 的 `caller` 与 `callee` 应绑定到两个不同实例。
+`tests/fixtures/lab.json` 中的 `duts` 提供两台 DUT，`TC_CALL_001` / `TC_HOLD_001` / `TC_AUDIO_001` 的 `caller` 与 `callee` 应绑定到两个不同实例。
 
 ### 场景 D：验证 Atomic Step 编译
 
@@ -212,8 +234,8 @@ python cli.py run --plan out/plan.json --junit out/results.xml
 同一个 Case（如 Hold）在不同 `operation_mode` 下应绑定到不同 Provider，但 Case 本身不变。
 
 ```powershell
-# physical 模式（config/device.json 默认 operation_mode = physical）
-python cli.py plan --device config/device.json --lab config/lab.json --cases cases/common.json --output out/plan_physical.json --scope common
+# physical 模式（tests/fixtures/device.json 默认 operation_mode = physical）
+python cli.py plan --device tests/fixtures/device.json --lab tests/fixtures/lab.json --output out/plan_physical.json --scope common
 
 # api 模式（复制一份 device 配置并将 operation_mode 改为 api）
 ```
@@ -244,8 +266,9 @@ Resolver 根据设备的 `operation_mode` 选择 backend 匹配的 Provider；AP
 
 | 文件 | 作用 |
 |---|---|
-| `config/device.json` | Device Profile：协议、能力、operation mode |
-| `config/lab.json` | Lab Config：真实 DUT 实例（DUT Pool）与台架资源 |
-| `cases/common.json` | Case 库：测试意图、所需能力、逻辑角色、资源、步骤 |
+| `config/device/` | Device Profile：`device_template.json` 样本 + 各设备实例（如 `device_ale700a.json`），纯类型字段 |
+| `config/lab/` | Lab Config：`lab_template.json` 样本 + 各实例（DUT Pool，每台 DUT 的 ip/control/number） |
+| `cases/` | Case Repository（固定目录）：按 scope 拆分为 `common.json` / `sip.json` / `noe.json`，用 `--scope` 选择 |
+| `tests/fixtures/` | 测试与文档示例用的通用配置（OEM_PHONE_A physical + 台架资源） |
 | `out/plan.json` | 生成的 Test Plan（执行契约） |
 | `out/results.xml` | 执行结果的 JUnit XML（供 Jenkins 发布） |

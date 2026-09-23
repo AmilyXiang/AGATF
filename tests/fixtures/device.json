@@ -1,0 +1,8 @@
+{
+  "name": "OEM_PHONE_A",
+  "protocol": "SIP",
+  "platform": "OXE",
+  "capabilities": ["basic_call", "hold", "resume", "transfer", "audio"],
+  "operation_mode": "physical",
+  "firmware": "R510"
+}

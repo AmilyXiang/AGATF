@@ -24,6 +24,18 @@ from core.provider import BaseProvider, StubProvider
 logger = logging.getLogger(__name__)
 
 
+class BindingError(ValueError):
+    """Base for resolver binding failures (subclasses ValueError for compat)."""
+
+
+class ProviderBindingError(BindingError):
+    """No registered provider can satisfy a case's capabilities/backend."""
+
+
+class DutBindingError(BindingError):
+    """The DUT Pool cannot satisfy a case's required roles/capabilities."""
+
+
 class Resolver:
     """Selects the right provider for a case and config combination."""
 
@@ -42,7 +54,7 @@ class Resolver:
             logger.debug("case %s -> provider %s (mode=%s)", case.id, provider.name, operation_mode)
             return provider
         logger.error("no provider for case %s caps=%s mode=%s", case.id, case.required_capabilities, operation_mode)
-        raise ValueError(f"No provider can satisfy case '{case.id}' for required capabilities {case.required_capabilities}")
+        raise ProviderBindingError(f"No provider can satisfy case '{case.id}' for required capabilities {case.required_capabilities}")
 
     def bind_roles(self, case: TestCase, dut_pool: DUTPool) -> dict[str, str]:
         """Bind logical Case roles to distinct real DUT instances."""
@@ -60,7 +72,7 @@ class Resolver:
                 None,
             )
             if selected is None:
-                raise ValueError(
+                raise DutBindingError(
                     f"Insufficient DUT Pool for case '{case.id}' role '{role}' "
                     f"with capabilities {sorted(required)}"
                 )

@@ -47,7 +47,11 @@ class SelectionStatus(str, Enum):
 
 @dataclass
 class DeviceProfile:
-    """Static device type definition shared by one or more DUT instances."""
+    """Static device type definition shared by one or more DUT instances.
+
+    Type-level only (slide4): reach/credential details (ip, web/control) belong
+    to the DUT instance in Lab Config, not to the device type.
+    """
 
     name: str
     protocol: str
@@ -55,12 +59,6 @@ class DeviceProfile:
     capabilities: list[str] = field(default_factory=list)
     operation_mode: str = "physical"
     firmware: str = "unknown"
-    ip: str | None = None
-    # Web management connection defaults for this device type (Active URI / CGI).
-    web_protocol: str = "http"
-    web_port: int | None = None
-    web_username: str = "admin"
-    web_verify_tls: bool = True
 
 
 # Backward-compatible name for the original P0 model.
@@ -77,6 +75,9 @@ class DUTInstance:
     ssh_port: int | None = None
     number: str | None = None
     resources: dict[str, str] = field(default_factory=dict)
+    # OEM-specific control/connection block (e.g. Active URI web settings),
+    # interpreted by the OEM's live provider builder.
+    control: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -183,6 +184,13 @@ class TestPlan:
     platform: str
     items: list[PlanItem] = field(default_factory=list)
     dut_pool: list[str] = field(default_factory=list)
+    # Audit / reproducibility metadata frozen with the plan (slide7).
+    environment: str = ""
+    scope: str = ""
+    firmware: str = "unknown"
+    generated_at: str = ""
+    expected_artifacts: list[str] = field(default_factory=list)
+    schema_version: int = 1
 
 
 @dataclass

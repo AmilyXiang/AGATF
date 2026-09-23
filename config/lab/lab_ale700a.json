@@ -12,13 +12,25 @@
       "id": "dut_ale_01",
       "profile": "ALE700A",
       "ip": "10.10.6.136",
-      "number": "1006"
+      "number": "4674",
+      "control": {
+        "protocol": "http",
+        "port": 80,
+        "username": "admin",
+        "verify_tls": false
+      }
     },
     {
       "id": "dut_ale_02",
       "profile": "ALE700A",
       "ip": "10.10.6.137",
-      "number": "1007"
+      "number": "1007",
+      "control": {
+        "protocol": "http",
+        "port": 80,
+        "username": "admin",
+        "verify_tls": false
+      }
     }
   ]
 }

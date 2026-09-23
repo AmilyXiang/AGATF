@@ -1,0 +1,13 @@
+[
+  {
+    "id": "TC_NOE_INIT_001",
+    "name": "noe_initialization",
+    "description": "NOE initialization sequence.",
+    "scope": "noe",
+    "protocols": ["NOE"],
+    "required_capabilities": ["basic_call"],
+    "steps": [
+      {"action": "reboot", "expected": "initialized", "timeout": 60}
+    ]
+  }
+]

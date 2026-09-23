@@ -25,6 +25,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+from core import provider_registry
 from core.models import Capability, TestCase
 
 logger = logging.getLogger(__name__)
@@ -147,3 +148,10 @@ class PhysicalStubProvider(_MessageProvider):
         "verify.call_connected": "Camera reads 'Connected' on screen",
         "verify.call_on_hold": "Camera reads 'On Hold' on screen",
     }
+
+
+# Register the neutral stubs so the Resolver/CLI source providers from the
+# registry (slide11/12) instead of hardcoding a list.
+provider_registry.register(StubProvider)
+provider_registry.register(ApiStubProvider)
+provider_registry.register(PhysicalStubProvider)

@@ -44,8 +44,8 @@
 - [oem/ale700a/action_url.py](../oem/ale700a/action_url.py)
 - [tools/http_client.py](../tools/http_client.py)
 - [tools/ssh_client.py](../tools/ssh_client.py)
-- [config/device_ale700a.json](../config/device_ale700a.json)
-- [config/lab_ale700a.json](../config/lab_ale700a.json)
+- [config/device_ale700a.json](../config/device/device_ale700a.json)
+- [config/lab_ale700a.json](../config/lab/lab_ale700a.json)
 
 ### 3.3 真实设备验证结论
 

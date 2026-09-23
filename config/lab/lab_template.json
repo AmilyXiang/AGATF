@@ -1,0 +1,47 @@
+{
+  "_comment": "Lab Config template (slide4): describes real DUT instances (DUT Pool) and bench resources for one environment. Copy to lab_<model>.json and edit. Each DUT carries its own reach info (ip) and an optional OEM 'control' block (e.g. Active URI web settings). Credentials: prefer secret_ref; inline password only for access-controlled internal repos.",
+  "name": "lab_environment_id",
+  "host": "10.0.0.1",
+  "secret_ref": "ENV_VAR_OR_SECRET_PATH",
+  "password": null,
+  "resources": {
+    "audio": "mic-01",
+    "camera": "cam-01",
+    "robot": "robot-01",
+    "network": "net-01"
+  },
+  "action_url": {
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "duts": [
+    {
+      "id": "dut_01",
+      "profile": "MODEL_NAME",
+      "ip": "10.0.0.21",
+      "ssh_port": 22,
+      "number": "1001",
+      "resources": {},
+      "control": {
+        "protocol": "http",
+        "port": 80,
+        "username": "admin",
+        "verify_tls": false
+      }
+    },
+    {
+      "id": "dut_02",
+      "profile": "MODEL_NAME",
+      "ip": "10.0.0.22",
+      "ssh_port": 22,
+      "number": "1002",
+      "resources": {},
+      "control": {
+        "protocol": "http",
+        "port": 80,
+        "username": "admin",
+        "verify_tls": false
+      }
+    }
+  ]
+}

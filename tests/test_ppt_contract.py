@@ -36,8 +36,8 @@ def test_plan_contract_keeps_case_steps(tmp_path):
     ]
 
     class Args:
-        device = "config/device.json"
-        lab = "config/lab.json"
+        device = "tests/fixtures/device.json"
+        lab = "tests/fixtures/lab.json"
         cases = "cases/common.json"
         output = str(tmp_path / "plan.json")
 

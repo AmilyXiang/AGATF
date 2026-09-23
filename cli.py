@@ -10,25 +10,37 @@ import argparse
 import json
 import logging
 import sys
-import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import oem  # noqa: F401 - imports register every OEM into the provider registry
+from core import provider_registry
 from core.executor import Executor
 from core.exit_codes import ExitCode
 from core.models import AtomicStep, CaseStep, DUTInstance, DUTPool, DeviceConfig, LabConfig, RuntimeContext, SelectionStatus, TestCase, TestPlan
-from core.provider import ApiStubProvider, PhysicalStubProvider, StubProvider
-from core.resolver import Resolver
-from oem.ale700a import ActionUrlListener, ActiveUriClient, Ale700aProvider
+from core.resolver import DutBindingError, ProviderBindingError, Resolver
 from core.selection import filter_applicable_cases
 
 logger = logging.getLogger(__name__)
+
+# The Case Repository is always this single directory (slide6); selection is by
+# --scope, so there is no --cases option.
+CASES_DIR = "cases"
 
 
 def load_json(path: str | Path) -> object:
     logger.debug("loading json %s", path)
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def load_case_repository() -> list:
+    # Load every case JSON from the single Case Repository (slide6).
+    data: list = []
+    for case_file in sorted(Path(CASES_DIR).glob("*.json")):
+        data.extend(load_json(case_file))
+    return data
 
 
 def build_runtime_context(device_data: dict, lab_data: dict) -> RuntimeContext:
@@ -40,11 +52,6 @@ def build_runtime_context(device_data: dict, lab_data: dict) -> RuntimeContext:
         capabilities=device_data.get("capabilities", []),
         operation_mode=device_data.get("operation_mode", "physical"),
         firmware=device_data.get("firmware", "unknown"),
-        ip=device_data.get("ip"),
-        web_protocol=device_data.get("web_protocol", "http"),
-        web_port=device_data.get("web_port"),
-        web_username=device_data.get("web_username", "admin"),
-        web_verify_tls=device_data.get("web_verify_tls", True),
     )
     lab = LabConfig(
         name=lab_data["name"],
@@ -64,11 +71,12 @@ def build_runtime_context(device_data: dict, lab_data: dict) -> RuntimeContext:
             ssh_port=item.get("ssh_port"),
             number=item.get("number"),
             resources=item.get("resources", {}),
+            control=item.get("control", {}),
         )
         for item in raw_instances
     ]
     if not instances:
-        instances = [DUTInstance(id=device.name, profile=device.name, ip=device.ip)]
+        instances = [DUTInstance(id=device.name, profile=device.name)]
 
     logger.info("runtime context: device=%s protocol=%s mode=%s duts=%d", device.name, device.protocol, device.operation_mode, len(instances))
     return RuntimeContext(
@@ -113,15 +121,15 @@ def parse_cases(case_data: list[dict]) -> list[TestCase]:
 
 def generate_plan(args: argparse.Namespace) -> None:
     # slide7 steps 1-6: load config, build context, filter cases, bind, plan.
-    logger.info("plan: device=%s lab=%s cases=%s scope=%s", args.device, args.lab, args.cases, getattr(args, "scope", None))
+    logger.info("plan: device=%s lab=%s scope=%s", args.device, args.lab, getattr(args, "scope", None))
     device_data = load_json(args.device)
     lab_data = load_json(args.lab)
-    case_data = load_json(args.cases)
+    case_data = load_case_repository()
     context = build_runtime_context(device_data, lab_data)
 
-    # Registry: specific backends first so operation_mode picks the right HOW
-    # (ALE-700A Active URI / API / Physical); the 'any' stub is the fallback.
-    resolver = Resolver([Ale700aProvider(), ApiStubProvider(), PhysicalStubProvider(), StubProvider()])
+    # Registry: the Resolver picks a provider by backend (slide11); OEMs are
+    # sourced from the registry so the CLI imports no vendor class.
+    resolver = Resolver(provider_registry.default_providers())
     all_cases = parse_cases(case_data)
 
     # Configuration-driven selection: only applicable cases enter the plan.
@@ -137,25 +145,54 @@ def generate_plan(args: argparse.Namespace) -> None:
         if outcome.status == SelectionStatus.READY
     }
 
-    plan = resolver.build_plan(
-        context.device.name,
-        context.device.protocol,
-        context.device.platform,
-        set(context.device.capabilities),
-        case_objs,
-        context.dut_pool,
-        resource_bindings,
-        context.device.operation_mode,
-    )
+    # Fail fast on binding problems, but surface them as structured exit codes
+    # (slide6) instead of a traceback: DUT shortage -> BLOCKED_RESOURCE, missing
+    # provider -> CONFIG_ERROR.
+    try:
+        plan = resolver.build_plan(
+            context.device.name,
+            context.device.protocol,
+            context.device.platform,
+            set(context.device.capabilities),
+            case_objs,
+            context.dut_pool,
+            resource_bindings,
+            context.device.operation_mode,
+        )
+    except DutBindingError as exc:
+        print(f"BLOCKED_RESOURCE {exc}")
+        logger.warning("plan: DUT binding failed: %s", exc)
+        return ExitCode.BLOCKED_RESOURCE
+    except ProviderBindingError as exc:
+        print(f"CONFIG_ERROR {exc}")
+        logger.warning("plan: provider binding failed: %s", exc)
+        return ExitCode.CONFIG_ERROR
+
+    # Freeze audit / reproducibility metadata with the plan (slide7): a unique
+    # run_id, the lab environment, the selected scope, firmware under test, the
+    # generation timestamp and the artifacts this run is expected to produce.
+    generated_at = datetime.now(timezone.utc)
+    plan.plan_id = f"{context.device.name}-{context.device.protocol}-{context.device.platform}-{generated_at:%Y%m%d%H%M%S}"
+    plan.environment = context.lab.name
+    plan.scope = scope or "all"
+    plan.firmware = context.device.firmware
+    plan.generated_at = generated_at.isoformat()
+    plan.expected_artifacts = ["junit"]
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("plan: %d items bound, writing %s", len(plan.items), out_path)
     payload = {
+        "schema_version": plan.schema_version,
         "plan_id": plan.plan_id,
+        "generated_at": plan.generated_at,
+        "environment": plan.environment,
+        "scope": plan.scope,
         "device": plan.device,
         "protocol": plan.protocol,
         "platform": plan.platform,
+        "firmware": plan.firmware,
+        "expected_artifacts": plan.expected_artifacts,
         "dut_pool": plan.dut_pool,
         "items": [
             {
@@ -201,10 +238,10 @@ def generate_plan(args: argparse.Namespace) -> None:
 
 def validate_config(args: argparse.Namespace) -> int:
     # Step 1 only: validate config and derive case status; never execute.
-    logger.info("validate: device=%s lab=%s cases=%s scope=%s", args.device, args.lab, args.cases, getattr(args, "scope", None))
+    logger.info("validate: device=%s lab=%s scope=%s", args.device, args.lab, getattr(args, "scope", None))
     device_data = load_json(args.device)
     lab_data = load_json(args.lab)
-    case_data = load_json(args.cases)
+    case_data = load_case_repository()
     context = build_runtime_context(device_data, lab_data)
 
     all_cases = parse_cases(case_data)
@@ -232,10 +269,10 @@ def validate_config(args: argparse.Namespace) -> int:
 
 def list_cases(args: argparse.Namespace) -> int:
     # List every case with its selection status; preparation only, no execution.
-    logger.info("list: device=%s lab=%s cases=%s scope=%s", args.device, args.lab, args.cases, getattr(args, "scope", None))
+    logger.info("list: device=%s lab=%s scope=%s", args.device, args.lab, getattr(args, "scope", None))
     device_data = load_json(args.device)
     lab_data = load_json(args.lab)
-    case_data = load_json(args.cases)
+    case_data = load_case_repository()
     context = build_runtime_context(device_data, lab_data)
 
     all_cases = parse_cases(case_data)
@@ -275,56 +312,7 @@ def _write_junit(result, path: Path) -> None:
     logger.info("junit: wrote %d tests (%d failures) to %s", len(result.evidences), failures, path)
 
 
-def _build_live_provider(args: argparse.Namespace) -> tuple[Ale700aProvider, ActionUrlListener, dict[str, str]]:
-    # Construct the real ALE-700A provider + shared Action URL listener from
-    # device/lab config so run --live drives a physical phone through the plan.
-    device_data = load_json(args.device)
-    lab_data = load_json(args.lab)
-    ip = device_data["ip"]
-    protocol = device_data.get("web_protocol", "http")
-    port = device_data.get("web_port")
-    base_url = f"{protocol}://{ip}" + (f":{port}" if port else "")
-    verify_tls = device_data.get("web_verify_tls", True) and not args.insecure
-
-    au = lab_data.get("action_url", {})
-    listener = ActionUrlListener(
-        host=au.get("host", "0.0.0.0"),
-        port=au.get("port", 8080),
-        on_event=lambda e: logger.info("[action-url] %s %s", e.event, e.params),
-    ).start()
-    print(f"Action URL listener on {listener.url}")
-
-    client = ActiveUriClient(
-        base_url,
-        username=device_data.get("web_username", "admin"),
-        password=lab_data.get("password"),
-        secret_ref=lab_data.get("secret_ref"),
-        verify_tls=verify_tls,
-    )
-    provider = Ale700aProvider(client=client, listener=listener, default_number=args.number or "")
-    # DUT id -> phone number, so dial/transfer targets come from bindings.
-    dut_numbers = {d["id"]: d.get("number", "") for d in lab_data.get("duts", lab_data.get("instances", []))}
-    return provider, listener, dut_numbers
-
-
-def run_plan(args: argparse.Namespace) -> None:
-    # slide7 steps 8-9: rebuild the plan from JSON, execute it, print evidence.
-    logger.info("run: plan=%s junit=%s live=%s", args.plan, getattr(args, "junit", None), getattr(args, "live", False))
-    plan_data = load_json(args.plan)
-    # Register every provider so the executor can resolve each item by name.
-    # In --live mode the ALE-700A stub is replaced by a real, phone-driving one.
-    listener: ActionUrlListener | None = None
-    dut_numbers: dict[str, str] = {}
-    if getattr(args, "live", False):
-        if not args.device or not args.lab:
-            logger.error("run --live requires --device and --lab")
-            return ExitCode.CONFIG_ERROR
-        ale_provider, listener, dut_numbers = _build_live_provider(args)
-    else:
-        ale_provider = Ale700aProvider()
-    providers = [ale_provider, ApiStubProvider(), PhysicalStubProvider(), StubProvider()]
-    executor = Executor({p.name: p for p in providers}, dut_numbers=dut_numbers)
-
+def _build_plan_from_json(plan_data: dict) -> TestPlan:
     plan_items = []
     for item in plan_data["items"]:
         case_payload = item["case"]
@@ -374,12 +362,49 @@ def run_plan(args: argparse.Namespace) -> None:
         items=plan_items,
         dut_pool=plan_data.get("dut_pool", []),
     )
+    return plan
+
+
+def run_plan(args: argparse.Namespace) -> int:
+    # slide7 steps 8-9: rebuild the plan from JSON, execute it, print evidence.
+    logger.info("run: plan=%s junit=%s live=%s", args.plan, getattr(args, "junit", None), getattr(args, "live", False))
+    plan_data = load_json(args.plan)
+
+    # Providers come from the registry so the executor resolves each item by
+    # name without the CLI importing any vendor class (slide11/12). In --live
+    # mode the OEM's registered live builder replaces its dry-run provider.
+    providers = {p.name: p for p in provider_registry.default_providers()}
+    dut_numbers: dict[str, str] = {}
+    teardown = None
+    if getattr(args, "live", False):
+        if not args.device or not args.lab:
+            logger.error("run --live requires --device and --lab")
+            return ExitCode.CONFIG_ERROR
+        device_data = load_json(args.device)
+        lab_data = load_json(args.lab)
+        operation_mode = device_data.get("operation_mode", "")
+        live = provider_registry.build_live_provider(
+            operation_mode,
+            device_data,
+            lab_data,
+            {
+                "insecure": getattr(args, "insecure", False),
+                "number": getattr(args, "number", None),
+                "dut": getattr(args, "dut", None),
+            },
+        )
+        providers[live.provider.name] = live.provider
+        dut_numbers = live.dut_numbers
+        teardown = live.teardown
+
+    executor = Executor(providers, dut_numbers=dut_numbers)
+    plan = _build_plan_from_json(plan_data)
 
     try:
         result = executor.run_plan(plan)
     finally:
-        if listener is not None:
-            listener.stop()
+        if teardown is not None:
+            teardown()
     print(json.dumps({
         "plan_id": result.plan_id,
         "evidences": [
@@ -408,45 +433,6 @@ def run_plan(args: argparse.Namespace) -> None:
     return ExitCode.SUCCESS
 
 
-def press(args: argparse.Namespace) -> int:
-    # Send a single Active URI key to a real phone for the simplest live check.
-    # The password is read from an environment variable, never from the CLI.
-    base_url = f"{args.protocol}://{args.ip}" + (f":{args.port}" if args.port else "")
-    client = ActiveUriClient(
-        base_url,
-        username=args.user,
-        secret_ref=args.secret_env,
-        verify_tls=not args.insecure,
-    )
-    ok, detail = client.send(args.key)
-    print(json.dumps(detail, indent=2))
-    if not ok:
-        logger.warning("press: phone did not accept key '%s'", args.key)
-        return ExitCode.TEST_FAILURE
-    return ExitCode.SUCCESS
-
-
-def listen(args: argparse.Namespace) -> int:
-    # Start the Action URL listener and print phone status callbacks as they
-    # arrive; used for manual verification against a real ALE-700A.
-    listener = ActionUrlListener(
-        host=args.host,
-        port=args.port,
-        on_event=lambda e: print(f"[event] {e.event} {e.params}"),
-    ).start()
-    print(f"Action URL listener on {listener.url}")
-    print("Configure the phone Action URL to point here, e.g.:")
-    print(f"  {listener.url}/action?event=call_established&mac=$mac&cid=$call_id&dt=$date_time")
-    print("Press Ctrl+C to stop.")
-    try:
-        threading.Event().wait()
-    except KeyboardInterrupt:
-        print("\nStopping listener.")
-    finally:
-        listener.stop()
-    return ExitCode.SUCCESS
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeskPhone automation CLI-first core")
     parser.add_argument(
@@ -458,51 +444,34 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser("validate", help="Validate config and case status without executing")
-    validate_parser.add_argument("--device", required=True)
-    validate_parser.add_argument("--lab", required=True)
-    validate_parser.add_argument("--cases", required=True)
-    validate_parser.add_argument("--scope", default=None, help="Only evaluate cases matching this scope")
+    validate_parser.add_argument("--device", required=True, help="Device config JSON (protocol / capabilities / operation_mode)")
+    validate_parser.add_argument("--lab", required=True, help="Lab config JSON (DUT pool / resources / bindings)")
+    validate_parser.add_argument("--scope", default=None, help="Only evaluate cases matching this scope (common / sip / noe)")
     validate_parser.set_defaults(func=validate_config)
 
     list_parser = subparsers.add_parser("list", help="List cases with their selection status")
-    list_parser.add_argument("--device", required=True)
-    list_parser.add_argument("--lab", required=True)
-    list_parser.add_argument("--cases", required=True)
-    list_parser.add_argument("--scope", default=None, help="Only list cases matching this scope")
+    list_parser.add_argument("--device", required=True, help="Device config JSON (protocol / capabilities / operation_mode)")
+    list_parser.add_argument("--lab", required=True, help="Lab config JSON (DUT pool / resources / bindings)")
+    list_parser.add_argument("--scope", default=None, help="Only list cases matching this scope (common / sip / noe)")
     list_parser.set_defaults(func=list_cases)
 
     plan_parser = subparsers.add_parser("plan", help="Generate a plan from config and case data")
-    plan_parser.add_argument("--device", required=True)
-    plan_parser.add_argument("--lab", required=True)
-    plan_parser.add_argument("--cases", required=True)
-    plan_parser.add_argument("--output", required=True)
-    plan_parser.add_argument("--scope", default=None, help="Only include cases matching this scope")
+    plan_parser.add_argument("--device", required=True, help="Device config JSON (protocol / capabilities / operation_mode)")
+    plan_parser.add_argument("--lab", required=True, help="Lab config JSON (DUT pool / resources / bindings)")
+    plan_parser.add_argument("--output", required=True, help="Output path for the generated plan JSON")
+    plan_parser.add_argument("--scope", default=None, help="Only include cases matching this scope (common / sip / noe)")
     plan_parser.set_defaults(func=generate_plan)
 
     run_parser = subparsers.add_parser("run", help="Execute a generated plan")
-    run_parser.add_argument("--plan", required=True)
+    run_parser.add_argument("--plan", required=True, help="Generated plan JSON to execute")
     run_parser.add_argument("--junit", default=None, help="Write JUnit XML results to this path")
-    run_parser.add_argument("--live", action="store_true", help="Drive a real ALE-700A (Active URI + Action URL) instead of the stub")
+    run_parser.add_argument("--live", action="store_true", help="Drive a real device via its registered live provider instead of the stub")
     run_parser.add_argument("--device", default=None, help="Device config (required with --live)")
     run_parser.add_argument("--lab", default=None, help="Lab config with credentials/action_url (required with --live)")
     run_parser.add_argument("--number", default=None, help="Dial/transfer target number for live actions")
+    run_parser.add_argument("--dut", default=None, help="DUT id to control in --live mode (default: first DUT in lab)")
     run_parser.add_argument("--insecure", action="store_true", help="Skip TLS verification for self-signed phone certs")
     run_parser.set_defaults(func=run_plan)
-
-    press_parser = subparsers.add_parser("press", help="Send one Active URI key to a real phone (simplest live check)")
-    press_parser.add_argument("--ip", required=True, help="Phone IP address, e.g. 10.10.6.141")
-    press_parser.add_argument("--key", required=True, help="Active URI key, e.g. SPEAKER or 'SPEAKER;1007;ENTER'")
-    press_parser.add_argument("--protocol", default="http", choices=["http", "https"], help="Web protocol (default http)")
-    press_parser.add_argument("--port", type=int, default=None, help="Web port (default: protocol default)")
-    press_parser.add_argument("--user", default="admin", help="HTTP Basic user (default admin)")
-    press_parser.add_argument("--secret-env", default="ALE700A_PASSWORD", help="Env var holding the phone password (default ALE700A_PASSWORD)")
-    press_parser.add_argument("--insecure", action="store_true", help="Skip TLS cert verification (phones use self-signed certs)")
-    press_parser.set_defaults(func=press)
-
-    listen_parser = subparsers.add_parser("listen", help="Start the Action URL listener for phone status callbacks")
-    listen_parser.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
-    listen_parser.add_argument("--port", type=int, default=8080, help="Bind port (default 8080)")
-    listen_parser.set_defaults(func=listen)
 
     return parser
 

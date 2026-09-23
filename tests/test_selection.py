@@ -71,9 +71,9 @@ def test_empty_constraints_are_applicable_to_any():
 def test_generated_plan_excludes_non_matching_protocol(tmp_path):
     # End-to-end: a SIP device must not produce a plan containing NOE-only cases.
     class Args:
-        device = "config/device.json"
-        lab = "config/lab.json"
-        cases = "cases/common.json"
+        device = "tests/fixtures/device.json"
+        lab = "tests/fixtures/lab.json"
+        cases = "cases"
         output = str(tmp_path / "plan.json")
         scope = None
 
